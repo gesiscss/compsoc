@@ -10,4 +10,4 @@
 
 Lietz, Haiko (ed.) (2020). *compsoc – Notebooks for Computational Sociology*. GESIS. url:[github.com/gesiscss/compsoc](https://github.com/gesiscss/compsoc)
 
-[![Binder](https://notebooks.gesis.org/binder/badge.svg)](https://notebooks.gesis.org/binder/v2/gh/gesiscss/compsoc/master?urlpath=lab/tree/index.ipynb)
+[![Binder](https://notebooks.gesis.org/binder/badge.svg)](https://notebooks.gesis.org/binder/v2/gh/gesiscss/compsoc/master?filepath=index.ipynb)
