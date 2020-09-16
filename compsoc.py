@@ -1,3 +1,17 @@
+def elite_families_collection(path='data/elite_families/'):
+    '''
+    Description: Loads the normalized elite families data collection.
+    
+    Output: Four dataframes in this order: families, parties, relations, domains
+    '''
+    import pandas as pd
+    families = pd.read_csv(path+'families.txt', sep='\t', encoding='utf-8')
+    parties = pd.read_csv(path+'parties.txt', sep='\t', encoding='utf-8')
+    relations = pd.read_csv(path+'relations.txt', sep='\t', encoding='utf-8')
+    domains = pd.read_csv(path+'domains.txt', sep='\t', encoding='utf-8')
+    
+    return families, parties, relations, domains
+
 def copenhagen_collection(path='data/copenhagen/'):
     '''
     Description: Loads the normalized Copenhagen Networks Study data collection.
@@ -98,6 +112,55 @@ def copenhagen_collection(path='data/copenhagen/'):
     facebook_friends.reset_index(drop=True, inplace=True)
     
     return users, genders, bluetooth, calls, sms, facebook_friends
+
+def weighted_edge_list_to_undirected(
+    edge_list, 
+    reciprocal=False, 
+    function='sum'
+):
+    '''
+    Description: Transforms a directed to an undirected weighted edge list.
+    
+    Inputs:
+        edge_list: Dataframe of a directed weighted edge list; first column must be 
+            identifier of node u, second column must be identifier of node v, third column 
+            must be edge weight w; all but the first three columns will be discarded.
+        reciprocal: Boolean variable if only reciprocated ties should be kept; set to 
+            False by default.
+        function: Function to chose edge weight after transformation; if 'min' the 
+            smaller weight will be chosen, if 'max' the larger weight will be chosen, if 
+            'sum' the weights of (u, v) and (v, u) will be summed; set to 'sum' by default.
+    
+    Output: Dataframe of an undirected weighted edge list.
+    '''
+    
+    import numpy as np
+    import pandas as pd
+    
+    # order node tuples
+    df = edge_list[edge_list.columns[:2]].copy()
+    df = df.T
+    df = df.transform(np.sort)
+    df = df.T
+    df = pd.concat([df, edge_list[edge_list.columns[2]]], axis=1)
+    
+    # flag reciprocal edges
+    if reciprocal:
+        df_count = df.groupby(df.columns[:2].tolist()).count().reset_index()
+    
+    # apply function
+    if function == 'sum':
+        df = df.groupby(df.columns[:2].tolist()).sum().reset_index()
+    if function == 'min':
+        df = df.groupby(df.columns[:2].tolist()).min().reset_index()
+    if function == 'max':
+        df = df.groupby(df.columns[:2].tolist()).max().reset_index()
+    
+    # keep only reciprocal edges
+    if reciprocal:
+        df = df[df_count[df_count.columns[2]] == 2].reset_index(drop=True)
+    
+    return df
 
 def project_selection_matrix(
     selections, 
@@ -439,7 +502,7 @@ def uniform_vertex_property(
     
     Output: Dictionary with vertex identifiers as keys and properties as values.
     '''
-    return dict(zip(g.nodes, g.number_of_nodes()*[vp]))
+    return dict(zip(g.nodes, g.number_of_nodes()*[vertex_property]))
 
 def partition_to_vertex_property(
     partition, 
@@ -459,18 +522,33 @@ def partition_to_vertex_property(
     
     Output: Dictionary with vertex identifiers as keys and properties as values.
     '''
-    return {index: _dict[identifier] for index, identifier in series.items()}
+    return {index: _dict[identifier] for index, identifier in partition.items()}
 
-def dict_values_to_list(_dict):
+def node_attribute_to_list(g, node_attribute):
     '''
-    Description: Returns list values for a given dictionary.
+    Description: Returns a node attribute as a list.
     
     Inputs:
-        _dict: Dictionary.
+        g: networkx graph object.
+        node_attribute: Name of the edge attribute; must be a string.
     
     Output: List.
     '''
-    return list(_dict.values())
+    import networkx as nx
+    return list(nx.get_node_attributes(g, node_attribute).values())
+
+def edge_attribute_to_list(g, edge_attribute):
+    '''
+    Description: Returns an edge attribute as a list.
+    
+    Inputs:
+        g: networkx graph object.
+        edge_attribute: Name of the edge attribute; must be a string.
+    
+    Output: List.
+    '''
+    import networkx as nx
+    return list(nx.get_edge_attributes(g, edge_attribute).values())
 
 def draw_graph(
     g, 
@@ -491,7 +569,7 @@ def draw_graph(
     edge_transparency=1, 
     curved_edges=False, 
     arrow_size=18, 
-    labels='text', 
+    labels=None, 
     label_transparency=1, 
     figsize='large', 
     margins=.1, 
