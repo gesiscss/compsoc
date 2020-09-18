@@ -1,0 +1,6 @@
+subfield_id	subfield	subfield_name
+0	CSS	Computational Social Science
+1	ES	Economic Sociology
+2	NS	Network Science
+3	SNA	Social Network Analysis
+4	SPE	Social Psychology & Epidemiology

@@ -1,0 +1,3 @@
+party_id	party
+0	Medici
+1	Oligarch
