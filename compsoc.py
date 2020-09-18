@@ -22,12 +22,12 @@ def sns_collection(path='data/sns/'):
     
     import pandas as pd
     
-    publications = pd.read_csv('data/sns/publications.txt', sep='\t', encoding='utf-8')
-    subfields = pd.read_csv('data/sns/subfields.txt', sep='\t', encoding='utf-8')
-    authors = pd.read_csv('data/sns/authors.txt', sep='\t', encoding='utf-8')
-    authorships = pd.read_csv('data/sns/authorships.txt', sep='\t', encoding='utf-8')
-    words = pd.read_csv('data/sns/words.txt', sep='\t', encoding='utf-8')
-    usages = pd.read_csv('data/sns/usages.txt', sep='\t', encoding='utf-8')
+    publications = pd.read_csv(path+'publications.txt', sep='\t', encoding='utf-8')
+    subfields = pd.read_csv(path+'subfields.txt', sep='\t', encoding='utf-8')
+    authors = pd.read_csv(path+'authors.txt', sep='\t', encoding='utf-8')
+    authorships = pd.read_csv(path+'authorships.txt', sep='\t', encoding='utf-8')
+    words = pd.read_csv(path+'words.txt', sep='\t', encoding='utf-8')
+    usages = pd.read_csv(path+'usages.txt', sep='\t', encoding='utf-8')
     
     return publications, subfields, authors, authorships, words, usages
 
