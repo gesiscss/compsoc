@@ -12,6 +12,25 @@ def elite_families_collection(path='data/elite_families/'):
     
     return families, parties, relations, domains
 
+def sns_collection(path='data/sns/'):
+    '''
+    Description: Loads the normalized Social Network Science data collection.
+    
+    Output: Six dataframes in this order: publications, subfields, authors, authorships, 
+        words, usages
+    '''
+    
+    import pandas as pd
+    
+    publications = pd.read_csv('data/sns/publications.txt', sep='\t', encoding='utf-8')
+    subfields = pd.read_csv('data/sns/subfields.txt', sep='\t', encoding='utf-8')
+    authors = pd.read_csv('data/sns/authors.txt', sep='\t', encoding='utf-8')
+    authorships = pd.read_csv('data/sns/authorships.txt', sep='\t', encoding='utf-8')
+    words = pd.read_csv('data/sns/words.txt', sep='\t', encoding='utf-8')
+    usages = pd.read_csv('data/sns/usages.txt', sep='\t', encoding='utf-8')
+    
+    return publications, subfields, authors, authorships, words, usages
+
 def copenhagen_collection(path='data/copenhagen/'):
     '''
     Description: Loads the normalized Copenhagen Networks Study data collection.
@@ -113,6 +132,36 @@ def copenhagen_collection(path='data/copenhagen/'):
     
     return users, genders, bluetooth, calls, sms, facebook_friends
 
+def weighted_edge_list_to_unlayered(
+    edge_list, 
+    function='sum'
+):
+    '''
+    Description: Transforms a weighted layered to an unlayered edge list.
+    
+    Inputs:
+        edge_list: Dataframe of a weighted layered edge list; first column must be 
+            identifier of node u, second column must be identifier of node v, third column 
+            must be edge weight w, fourth column must be the layer identifier; the layer 
+            identifier must be an integer from 0 to n-1 where n is the number of layers; 
+            all but the first four columns will be discarded.
+        function: Function to chose edge weight after transformation; if 'min' the 
+            smaller weight will be chosen, if 'max' the larger weight will be chosen, if 
+            'sum' the weights of (u, v) and (v, u) will be summed; set to 'sum' by default.
+    
+    Output: Dataframe of a weighted unlayered edge list.
+    '''
+    
+    df = edge_list.copy()
+    if function == 'sum':
+        df = df.groupby(df.columns[:2].tolist()).sum().reset_index()
+    if function == 'min':
+        df = df.groupby(df.columns[:2].tolist()).min().reset_index()
+    if function == 'max':
+        df = df.groupby(df.columns[:2].tolist()).max().reset_index()
+    
+    return df[df.columns[:3]]
+
 def weighted_edge_list_to_undirected(
     edge_list, 
     reciprocal=False, 
@@ -161,6 +210,41 @@ def weighted_edge_list_to_undirected(
         df = df[df_count[df_count.columns[2]] == 2].reset_index(drop=True)
     
     return df
+
+def weighted_layered_edge_list_to_undirected(
+    edge_list, 
+    reciprocal=False, 
+    function='sum'
+):
+    '''
+    Description: Transforms a directed to an undirected weighted layered edge list.
+    
+    Inputs:
+        edge_list: Dataframe of a directed weighted layered edge list; first column must 
+            be identifier of node u, second column must be identifier of node v, third 
+            column must be edge weight w, fourth column must be the layer identifier; the 
+            layer identifier must be an integer from 0 to n-1 where n is the number of 
+            layers; all but the first four columns will be discarded.
+        reciprocal: Boolean variable if only reciprocated ties should be kept; set to 
+            False by default.
+        function: Function to chose edge weight after transformation; if 'min' the 
+            smaller weight will be chosen, if 'max' the larger weight will be chosen, if 
+            'sum' the weights of (u, v) and (v, u) will be summed; set to 'sum' by default.
+    
+    Output: Dataframe of an undirected weighted layered edge list.
+    '''
+    
+    import compsoc as cs
+    import pandas as pd
+    
+    edge_list_undirected = pd.DataFrame(columns=edge_list.columns[:4])
+    for identifier in set(edge_list[edge_list.columns[3]]):
+        df = edge_list[edge_list[edge_list.columns[3]] == identifier]
+        df = cs.weighted_edge_list_to_undirected(edge_list=df, reciprocal=reciprocal, function=function)
+        df[edge_list.columns[3]] = identifier
+        edge_list_undirected = pd.concat([edge_list_undirected, df])
+    
+    return edge_list_undirected.reset_index(drop=True)
 
 def project_selection_matrix(
     selections, 
@@ -446,16 +530,33 @@ def construct_graph(
         directed: Boolean parameter specifying if graph should be directed.
         multiplex: Boolean parameter specifying if graph should be multiplex.
         graph_name: Name of the graph (string); must be specified.
-        node_list: Dataframe containing the node properties; must contain a continuous index from 0 to N-1 where N is the number of vertices; must contain a column holding the name of each vertex; must contain a column holding an integer that codes the class a vertex belongs to (used to color the vertices).
-        node_pos: List of two columns of the dataframe ``node_list`` that hold the x and y positions of each node; must be numerical variables; set to ``None`` by default.
-        node_size: Name of the column of the dataframe ``node_list`` that holds the size of each node; must be a numerical variable; set to ``None`` by default.
-        node_color: Name of the column of the dataframe ``node_list`` that holds the color of each node; must be a hexadecimal color variable; set to ``None`` by default.
-        node_shape: Name of the column of the dataframe ``node_list`` that codes the shape of each node; must be an integer between 0 and 9; set to ``None`` by default.
-        node_border_color: Name of the column of the dataframe ``node_list`` that holds the color of each node border; must be a hexadecimal color variable; set to ``None`` by default.
-        node_label: Name of the column of the dataframe ``node_list`` that holds the name of each node; must be a string variable; set to ``None`` by default.
-        attribute_shape: Dictionary containing the mapping from the integer stored in the 'node_shape' column to a shape; matplotlib.scatter markers 'so^>v<dph8' are used by default.
-        edge_list: Dataframe with exactly three columns (source node id, target node id, edge weight; in that order) containing the edges of the graph; if the graph is multiplex, a fourth column must contain an integer between 0 and N-1 where N is the number of edge layers; must be specified.
-        layer_color: Dictionary containing the mapping from the layer integer stored in the fourth column of the ``edge_list`` to a hexadecimal color; a dictionary of nine colors that are qualitatively distinguishable is used by default.
+        node_list: Dataframe containing the node properties; must contain a continuous 
+            index from 0 to N-1 where N is the number of vertices; must contain a column 
+            holding the name of each vertex; must contain a column holding an integer that 
+            codes the class a vertex belongs to (used to color the vertices).
+        node_pos: List of two columns of the dataframe ``node_list`` that hold the x and y 
+            positions of each node; must be numerical variables; set to ``None`` by default.
+        node_size: Name of the column of the dataframe ``node_list`` that holds the size 
+            of each node; must be a numerical variable; set to ``None`` by default.
+        node_color: Name of the column of the dataframe ``node_list`` that holds the color 
+            of each node; must be a hexadecimal color variable; set to ``None`` by default.
+        node_shape: Name of the column of the dataframe ``node_list`` that codes the shape 
+            of each node; must be an integer between 0 and 9; set to ``None`` by default.
+        node_border_color: Name of the column of the dataframe ``node_list`` that holds 
+            the color of each node border; must be a hexadecimal color variable; set to 
+            ``None`` by default.
+        node_label: Name of the column of the dataframe ``node_list`` that holds the name 
+            of each node; must be a string variable; set to ``None`` by default.
+        attribute_shape: Dictionary containing the mapping from the integer stored in the 
+            'node_shape' column to a shape; matplotlib.scatter markers 'so^>v<dph8' are 
+            used by default.
+        edge_list: Dataframe with exactly three columns (source node id, target node id, 
+            edge weight; in that order) containing the edges of the graph; if the graph is 
+            multiplex, a fourth column must contain an integer between 0 and N-1 where N 
+            is the number of edge layers; must be specified.
+        layer_color: Dictionary containing the mapping from the layer integer stored in 
+            the fourth column of the ``edge_list`` to a hexadecimal color; a dictionary of 
+            nine colors that are qualitatively distinguishable is used by default.
     
     Output: networkx graph object, potentially with graph, node, and edge attributes.
     '''
@@ -559,7 +660,7 @@ def draw_graph(
     node_shape='internal', 
     node_border_color='internal', 
     node_border_width=1, 
-    node_label='internal', 
+    #node_label='internal', 
     font_size='node_size', 
     font_size_factor=1, 
     font_color='black', 
@@ -581,7 +682,60 @@ def draw_graph(
     
     Inputs:
         g: Graph to be drawn; must be networkx graph object.
-        ...
+        node_pos: Node positions to be used for drawing; when set to 'internal' 
+            (default), then the 'node_pos' attribute will be used, else a standard 
+            spring layout is inferred; node color will be 'white'; parameter can take a 
+            dictionary with node positions as values; when set to None, then a standard 
+            spring layout is inferred.
+        node_size: Node sizes to be used for drawing; when set to 'internal' (default), 
+            then the 'node_size' attribute will be used, else node size will depend on 
+            the number of nodes; parameter can take a dictionary with node sizes as 
+            values; when set to None, node size will depend on the number of nodes.
+        node_size_factor: Factor to change node size; set to 1 by default.
+        node_color: Node colors to be used for drawing; when set to 'internal' (default), 
+            then the 'node_color' attribute will be used, else node color will be 
+            'white'; parameter can take a dictionary with hexadecimal or string node 
+            colors as values; when set to None, node color will be 'white'.
+        node_shape: Node shapes to be used for drawing; when set to 'internal' (default), 
+            then the 'node_shape' attribute will be used, else node shape will be 'o'; 
+            parameter can take a dictionary with node shapes as values; when set to None, 
+            node shape will be 'o'.
+        node_border_color: Node border colors to be used for drawing; when set to 
+            'internal' (default), then the 'node_border_color' attribute will be used, 
+            else node border color will be 'gray'; parameter can take a dictionary with 
+            hexadecimal node colors as values; when set to None, node border color will 
+            be 'gray'.
+        node_border_width: Width of node border; set to 1 by default.
+        node_label: Node labels to be used for drawing; when set to 'internal' (default), 
+            then the 'node_label' attribute will be used.
+        font_size: Font sizes to be used for drawing; when set to 'node_size' (default), 
+            then the 'node_size' attribute will be used, else font size will be 12; 
+            parameter can take a dictionary with font sizes as values; when set to None, 
+            font size will be 12.
+        font_size_factor: Factor to change font size; set to 1 by default.
+        font_color: set to 'black' by default; parameter can take a hexadecimal or string 
+            color.
+        edge_width: Edge widths to be used for drawing; when set to 'internal' (default), 
+            then the 'edge_width' attribute will be used, else edge width will be 1; 
+            parameter can take a list of edge widths; when set to None, edge width will 
+            be 1.
+        edge_width_factor: Factor to change edge width; set to 1 by default.
+        edge_color: Edge colors to be used for drawing; when set to 'internal' (default), 
+            then the 'edge_color' attribute will be used, else edge width be 1; parameter 
+            can take a list of edge colors; when set to None, edge width will be 1.
+        edge_transparency: Alpha transparency of edge colors; set to 1 by default.
+        curved_edges: Boolean parameter specifying if edges should be curved.
+        arrow_size: Size of arrows; set to 18 by default; must be numerical.
+        labels: If 'text', then the internal 'node_label' attribute will be used; if 
+            'id', then the node identifier will be used.
+        label_transparency: Alpha transparency of font color; set to 1 by default.
+        figsize: Size of the figure; when set to 'small', then the plot will have size 
+            (4, 4); when set to 'medium', then the plot will have size (8, 8); when set 
+            to 'large', then the plot will have size (12, 12).
+        margins: Margins of the figure; set to .1 by default; increase it if nodes extend 
+            outside the drawing area.
+        pdf: Name of a pdf file to be written.
+        png: Name of a png file to be written.
     
     Output: ...
     '''
