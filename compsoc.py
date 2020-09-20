@@ -256,15 +256,19 @@ def project_selection_matrix(
     symmetrize=True
 ):
     '''
-    Description: Projects a selection matrix to a transaction similarity matrix or a fact 
-        co-selection matrix; computes fact attributes; computes cumulative co-selection 
-        fractions for matrix filtering.
+    Description: This function uses the terminology of the compsoc unified data model 
+        according to which "transactions select facts"; these selections are stored in a 
+        selection matrics; the function projects a selection matrix to a transaction 
+        similarity matrix or a fact co-selection matrix; computes fact attributes; 
+        computes cumulative co-selection fractions for matrix filtering.
     
     Inputs:
         selections: Dataframe containing the selection matrix indices and data; must 
             contain a 'weight' column that contains the cell weights.
         how: String that specifies which projection is to be made; must be either 
-            'transactions' or 'facts'.
+            'transactions' or 'facts'; if 'transactions', then the matrix of transactions 
+            coupled by facts will be created; if 'facts', then the matrix of facts 
+            coupled by transactions will be created.
         transaction_id: Name of the column of the dataframe ``selections`` that holds the 
             identifiers of the transactions selecting facts.
         fact_id: Name of the column of the dataframe ``selections`` that holds the 
@@ -508,6 +512,69 @@ def meaning_structures(
             
             return co_selections, facts_enriched
 
+
+def uniform_vertex_property(
+    g, 
+    vertex_property
+):
+    '''
+    Description: Creates a uniform vertex property.
+    
+    Inputs:
+        g: Graph for which the property should be created; must be a networkx graph object.
+        vertex_property: Uniform property; can be anything from a hexadecimal color to a 
+            string or numerical.
+    
+    Output: Dictionary with vertex identifiers as keys and properties as values.
+    '''
+    return dict(zip(g.nodes, g.number_of_nodes()*[vertex_property]))
+
+def partition_to_vertex_property(
+    partition, 
+    _dict
+):
+    '''
+    Description: Creates a vertex property dictionary.
+    
+    Inputs:
+        partition: Dataframe column (series); indices must be integers from 0 to n-1 where 
+            n is the number of vrtices in the graph for whch the vertext property is made; 
+            values must be integers from 0 to m-1 where m is the number of partitions of 
+            vertex partitions.
+        _dict: Dictionary that maps partition identifiers (keys) to vertex properties 
+            (values); properties can be anything from hexadecimal colors to strings and 
+            numericals.
+    
+    Output: Dictionary with vertex identifiers as keys and properties as values.
+    '''
+    return {index: _dict[identifier] for index, identifier in partition.items()}
+
+def node_attribute_to_list(g, node_attribute):
+    '''
+    Description: Returns a node attribute as a list.
+    
+    Inputs:
+        g: networkx graph object.
+        node_attribute: Name of the edge attribute; must be a string.
+    
+    Output: List.
+    '''
+    import networkx as nx
+    return list(nx.get_node_attributes(g, node_attribute).values())
+
+def edge_attribute_to_list(g, edge_attribute):
+    '''
+    Description: Returns an edge attribute as a list.
+    
+    Inputs:
+        g: networkx graph object.
+        edge_attribute: Name of the edge attribute; must be a string.
+    
+    Output: List.
+    '''
+    import networkx as nx
+    return list(nx.get_edge_attributes(g, edge_attribute).values())
+
 def construct_graph(
     directed, 
     multiplex, 
@@ -581,75 +648,15 @@ def construct_graph(
     
     # populate graph with edges and their properties
     if multiplex == True:
-        for i in set(edge_list[edge_list.columns[3]]):
-            df = edge_list[edge_list[edge_list.columns[3]] == i][edge_list.columns[:3]]
-            g.add_weighted_edges_from(df.values, edge_color=layer_color[i])
+        edge_list = edge_list[edge_list.columns[:4]]
+        edge_list.loc[:, 'color'] = [layer_color[identifier] for identifier in edge_list[edge_list.columns[3]].values]
+        edge_list.loc[:, 'dict'] = edge_list[[edge_list.columns[2], 'color']].to_dict(orient='records')
+        edge_list.drop([edge_list.columns[2], 'color'], axis=1, inplace=True)
+        g.add_edges_from(edge_list.values)
     else:
         g.add_weighted_edges_from(edge_list[edge_list.columns[:3]].values)
     
     return g
-
-def uniform_vertex_property(
-    g, 
-    vertex_property
-):
-    '''
-    Description: Creates a uniform vertex property.
-    
-    Inputs:
-        g: Graph for which the property should be created; must be a networkx graph object.
-        vertex_property: Uniform property; can be anything from a hexadecimal color to a 
-            string or numerical.
-    
-    Output: Dictionary with vertex identifiers as keys and properties as values.
-    '''
-    return dict(zip(g.nodes, g.number_of_nodes()*[vertex_property]))
-
-def partition_to_vertex_property(
-    partition, 
-    _dict
-):
-    '''
-    Description: Creates a vertex property dictionary.
-    
-    Inputs:
-        partition: Dataframe column (series); indices must be integers from 0 to n-1 where 
-            n is the number of vrtices in the graph for whch the vertext property is made; 
-            values must be integers from 0 to m-1 where m is the number of partitions of 
-            vertex partitions.
-        _dict: Dictionary that maps partition identifiers (keys) to vertex properties 
-            (values); properties can be anything from hexadecimal colors to strings and 
-            numericals.
-    
-    Output: Dictionary with vertex identifiers as keys and properties as values.
-    '''
-    return {index: _dict[identifier] for index, identifier in partition.items()}
-
-def node_attribute_to_list(g, node_attribute):
-    '''
-    Description: Returns a node attribute as a list.
-    
-    Inputs:
-        g: networkx graph object.
-        node_attribute: Name of the edge attribute; must be a string.
-    
-    Output: List.
-    '''
-    import networkx as nx
-    return list(nx.get_node_attributes(g, node_attribute).values())
-
-def edge_attribute_to_list(g, edge_attribute):
-    '''
-    Description: Returns an edge attribute as a list.
-    
-    Inputs:
-        g: networkx graph object.
-        edge_attribute: Name of the edge attribute; must be a string.
-    
-    Output: List.
-    '''
-    import networkx as nx
-    return list(nx.get_edge_attributes(g, edge_attribute).values())
 
 def draw_graph(
     g, 
@@ -660,7 +667,7 @@ def draw_graph(
     node_shape='internal', 
     node_border_color='internal', 
     node_border_width=1, 
-    #node_label='internal', 
+    node_label='internal', 
     font_size='node_size', 
     font_size_factor=1, 
     font_color='black', 
@@ -731,13 +738,13 @@ def draw_graph(
         label_transparency: Alpha transparency of font color; set to 1 by default.
         figsize: Size of the figure; when set to 'small', then the plot will have size 
             (4, 4); when set to 'medium', then the plot will have size (8, 8); when set 
-            to 'large', then the plot will have size (12, 12).
+            to 'large', then the plot will have size (12, 12); set to 'large' by default.
         margins: Margins of the figure; set to .1 by default; increase it if nodes extend 
             outside the drawing area.
         pdf: Name of a pdf file to be written.
         png: Name of a png file to be written.
     
-    Output: ...
+    Output: The graph will be drawn.
     '''
     
     # use internal node and edge attributes for drawing, otherwise use external attributes or none
@@ -826,8 +833,8 @@ def draw_graph(
         ep_edge_width = [edge_width_factor*x for x in ep_edge_width]
     
     if edge_color == 'internal':
-        if bool(nx.get_edge_attributes(g, 'edge_color')):
-            ep_edge_color = list(nx.get_edge_attributes(g, 'edge_color').values())
+        if bool(nx.get_edge_attributes(g, 'color')):
+            ep_edge_color = list(nx.get_edge_attributes(g, 'color').values())
         else:
             ep_edge_color = g.number_of_edges()*['gray']
     else:
