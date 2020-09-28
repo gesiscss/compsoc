@@ -249,8 +249,8 @@ def weighted_layered_edge_list_to_undirected(
 def project_selection_matrix(
     selections, 
     how, 
-    transaction_id='transaction_id', 
-    fact_id='fact_id', 
+    transaction_id, 
+    fact_id, 
     norm=True, 
     remove_loops=True, 
     symmetrize=True
@@ -906,4 +906,4 @@ def draw_graph(
     if pdf:
         plt.savefig(pdf+'.pdf')
     if png:
-        plt.savefig(png+'.png')
+        plt.savefig(png+'.png', transparent=True)
