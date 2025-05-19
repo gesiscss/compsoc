@@ -1,5 +1,0 @@
-domain_id	domain
-0	Marriage
-1	Economic
-2	Political
-3	Friendship

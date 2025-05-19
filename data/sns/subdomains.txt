@@ -1,0 +1,7 @@
+subdomain_id	subdomain_name
+0	Organizations & innovation
+1	Complex networks
+2	Methods & models
+3	Social capital
+4	Social support
+-1	NOT INFERRED
