@@ -2,12 +2,12 @@ name: compsoc
 channels:
   - conda-forge
 dependencies:
-  - python=3.11.5
-  - matplotlib=3.7.2
-  - scikit-learn=1.2.2
-  - numpy=1.25.2
-  - scipy=1.11.1
-  - pandas=2.0.3
-  - networkx=3.1
-  - graph-tool=2.58
-  - powerlaw=1.4.6
+  - python=3.11.15
+  - graph-tool=2.98
+  - jupyterlab=4.5.6
+  - matplotlib=3.10.9
+  - numpy=2.4.3
+  - pandas=3.0.2
+  - powerlaw=2.0.0
+  - scikit-learn=1.8.0
+  - scipy=1.17.1

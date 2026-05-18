@@ -1,0 +1,26 @@
+#!/bin/bash
+# Build the box_cover binary (Akiba et al. 2015) used by fractality().
+# We bypass the upstream WAF build system because it uses Python 2 syntax
+# and depends on the `imp` module, which was removed in Python 3.12.
+set -euo pipefail
+
+SRC=/tmp/graph-sketch-fractality
+git clone --depth=1 https://github.com/kenkoooo/graph-sketch-fractality.git "$SRC"
+
+mkdir -p bin
+g++ -std=c++11 -O3 -pthread -w \
+  -I"$SRC/src" -I"$SRC/3rd_party" \
+  "$SRC"/3rd_party/gflags/gflags.cc \
+  "$SRC"/3rd_party/gflags/gflags_completions.cc \
+  "$SRC"/3rd_party/gflags/gflags_reporting.cc \
+  "$SRC"/src/base/functions.cc \
+  "$SRC"/src/base/jlog.cc \
+  "$SRC"/src/base/random.cc \
+  "$SRC"/src/base/type.cc \
+  "$SRC"/src/graph/generator.cc \
+  "$SRC"/src/graph/io.cc \
+  "$SRC"/src/box_cover/box_cover.cc \
+  "$SRC"/src/box_cover/box_cover_main.cc \
+  -o bin/box_cover
+
+rm -rf "$SRC"
