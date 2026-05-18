@@ -10,4 +10,4 @@
 
 Lietz, H. (ed.) (2026). *compsoc – Computational Social Methods in Python*. Cologne: GESIS – Leibniz Institute for the Social Sciences. [https://github.com/gesiscss/compsoc](https://github.com/gesiscss/compsoc)
 
-[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/gesiscss/compsoc/HEAD?urlpath=%2Fdoc%2Ftree%2Findex.ipynb)
+[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/gesiscss/compsoc/HEAD)
