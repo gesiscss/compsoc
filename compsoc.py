@@ -13,6 +13,8 @@ import tempfile
 import warnings
 
 from collections import Counter
+from collections.abc import Sequence
+from numpy.lib.stride_tricks import sliding_window_view
 from pathlib import Path
 from scipy.optimize import curve_fit
 from scipy.sparse import coo_matrix
@@ -850,3 +852,267 @@ def fractality(
         else:
             (a, d_B_fit, lv), _ = curve_fit(_tpl, x, y, sigma=sigma, bounds=([a_lo, d_lo, l_lo], [a_hi, d_hi, l_hi]))
             return FractalityResult(a=float(a), d_B=float(d_B_fit), l=float(lv), boxes=boxes, centers=centers)
+
+
+# Number of tightening levels (the 1%..100% grid) over which Fisher Information
+# is averaged for each window, following Ahmad et al. (2016).
+_FI_TIGHTENING_LEVELS = 100
+# Fisher Information of a single-state window; its theoretical maximum (a window
+# collapsed into one state yields 4 * ((0 - 1)^2 + (1 - 0)^2) = 8).  Used to find
+# the loosest tightening level at which a window first splits into >1 state.
+_FI_SINGLE_STATE = 8.0
+
+
+def _fi_size_of_states(values: np.ndarray, window: int, k: float) -> np.ndarray:
+    """Auto-derive the size of states per variable: ``k`` * minimum sliding s.d.
+
+    Reproduces the heuristic of the reference implementation's ``SOST`` step —
+    scan every full-length sliding window, take the smallest per-variable
+    standard deviation (the most stable stretch) and scale it by *k*
+    (Chebyshev's inequality; *k* = 2 keeps ~75% of observations inside the box).
+    Missing values (NaN) invalidate any window that contains them.
+    """
+    n_rows, n_vars = values.shape
+    if window > n_rows:
+        return np.zeros(n_vars)
+    sw = sliding_window_view(values, window, axis=0)   # (n_win, n_vars, window)
+    with np.errstate(invalid="ignore"):
+        stds = np.std(sw, axis=2, ddof=1)
+    stds = np.where(np.isnan(sw).any(axis=2), np.inf, stds)
+    sost = np.min(stds, axis=0)
+    sost[~np.isfinite(sost)] = 0.0                     # variable had no full window
+    return sost * k
+
+
+def _fi_state_sizes(bin_mat: np.ndarray, threshold: int) -> list[int]:
+    """Greedily assign window points to states for one tightening threshold.
+
+    ``bin_mat[m, n]`` holds the number of variables for which points *m* and *n*
+    lie within the size of states (the diagonal is masked to -1).  The first
+    unassigned point claims every still-unassigned point that matches it in at
+    least *threshold* variables; the process repeats.  State sizes are returned
+    in discovery order, which the Fisher Information sum below depends on.
+    """
+    w = bin_mat.shape[0]
+    assigned = np.zeros(w, dtype=bool)
+    sizes: list[int] = []
+    for j in range(w):
+        if assigned[j]:
+            continue
+        members = (~assigned) & (bin_mat[j] >= threshold)
+        members[j] = True
+        assigned |= members
+        sizes.append(int(members.sum()))
+    return sizes
+
+
+def _fi_from_state_sizes(sizes: list[int], n_points: int) -> float:
+    """Fisher Information of one window: ``4 * sum (sqrt(p_i) - sqrt(p_i+1))^2``.
+
+    Probabilities ``p_i = size_i / n_points`` are padded with a leading and
+    trailing zero so the amplitude ``sqrt(p)`` rises from and falls back to zero.
+    """
+    p = np.asarray(sizes, dtype=float) / n_points
+    q = np.sqrt(np.concatenate(([0.0], p, [0.0])))
+    return 4.0 * float(np.sum(np.diff(q) ** 2))
+
+
+def fisher_information_multivariate(
+    data: pd.DataFrame,
+    window_size: int,
+    window_increment: int = 1,
+    time_col: str = "time",
+    variable_col: str = "variable",
+    value_col: str = "value",
+    size_of_states: Sequence[float] | np.ndarray | None = None,
+    sost_window: int | None = None,
+    sost_k: float = 2.0,
+    n_levels: int = _FI_TIGHTENING_LEVELS,
+) -> pd.DataFrame:
+    """Track system stability with the multivariate Fisher Information of Ahmad et al. (2016).
+
+    Slides a fixed-width window along a multivariate time series and, for each
+    window, bins time points into indistinguishable *states* and computes the
+    Fisher Information (FI) of the resulting state-probability distribution.
+    High FI means the system dwells in few states (stable/ordered); low FI means
+    it spreads across many states (unstable/disordered).
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Multivariate time series in **long (tidy) format**: one row per
+        observation, with a time column, a variable-name column and a numeric
+        value column (see *time_col*, *variable_col*, *value_col*).  It is
+        pivoted internally to a time-by-variable table; every
+        ``(time, variable)`` combination absent from *data* becomes a missing
+        value (NaN).  Time steps and variables keep their order of first
+        appearance.  Each computed FI value is assigned to its window's final
+        time step.
+    window_size : int
+        Number of consecutive time steps in each window (``>= 2``).
+    window_increment : int, optional
+        Number of time steps to advance the window between successive FI values.
+        Default ``1``.
+    time_col, variable_col, value_col : str, optional
+        Column names in the long-format *data* holding, respectively, the time
+        label, the variable name, and the (numeric) observation.  Default
+        ``'time'``, ``'variable'``, ``'value'``.
+    size_of_states : sequence of float or numpy.ndarray or None, optional
+        Per-variable box half-width ``Δy`` (one non-negative value per variable,
+        in the variables' order of first appearance).  When ``None`` (default)
+        it is derived automatically as *sost_k* times the smallest
+        sliding-window standard deviation of each variable (see
+        :func:`_fi_size_of_states`).
+    sost_window : int or None, optional
+        Window length used when auto-deriving *size_of_states*.  Defaults to
+        *window_size* when ``None``.  Ignored when *size_of_states* is given.
+    sost_k : float, optional
+        Chebyshev multiplier for the auto-derived size of states.  Default
+        ``2.0``.  Ignored when *size_of_states* is given.
+    n_levels : int, optional
+        Number of tightening levels on the 1%..100% grid over which FI is
+        averaged per window.  Default ``100``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per window, indexed by the window's final time label (index name
+        taken from *time_col*), with a single column ``'fisher_information'``.
+        Empty if no full-length window fits.
+
+    Raises
+    ------
+    ValueError
+        If *data* is not a non-empty DataFrame, if any of *time_col*,
+        *variable_col*, *value_col* is missing, if *value_col* is non-numeric, if
+        *data* holds duplicate ``(time, variable)`` pairs, if *window_size* < 2
+        or exceeds the number of distinct time steps, if *window_increment* < 1,
+        if *n_levels* < 1, or if a supplied *size_of_states* has the wrong length
+        or holds a negative/non-finite value.
+
+    Notes
+    -----
+    The long-format input is pivoted to a dense time-by-variable table, so peak
+    memory and cost scale with ``n_time_steps * n_variables`` regardless of how
+    sparse the long form is.  Missing observations (NaN) never satisfy the
+    size-of-state criterion, but the tightening-level denominator uses the full
+    variable count, so variables systematically absent across a window make even
+    identical points fail to bin and inflate FI in that window.
+
+    The state test compares points with a single *absolute* half-width ``Δy_i``
+    per variable, so it assumes each variable varies on one characteristic
+    scale.  Heavy-tailed / power-law-distributed variables (mostly small values
+    with rare extremes) violate this: a fixed ``Δy_i`` is too loose near zero and
+    too tight in the tail, and the auto-derived ``Δy_i`` collapses onto the
+    calmest stretch, so the rare extremes dominate the state structure.  Apply a
+    variance-stabilising transform (e.g. ``log``/``log1p``, Box-Cox or a rank
+    transform) to such variables *before* calling this function; it performs no
+    transformation of its own.
+
+    Two time points share a state when ``|y_i(t_a) - y_i(t_b)| <= Δy_i`` for a
+    sufficient fraction of variables *i*.  That fraction is the *tightening
+    level* (TL): at TL = 100% all variables must match, and it relaxes down the
+    grid.  Because the match count is an integer in ``[0, n_variables]``, the
+    *n_levels* TLs collapse to at most ``n_variables`` distinct groupings, which
+    are computed once each rather than once per level.  The reported FI is the
+    mean over the TLs from the loosest level at which the window first splits
+    into more than one state up to TL = 100%.
+
+    This is computed independently per window; the reference implementation
+    instead reused the single loosest split level found across *all* windows,
+    which inflated the FI of the more stable windows.  Comparisons against NaN
+    and the pairwise box test are fully vectorised with NumPy broadcasting.
+
+    References
+    ----------
+    Ahmad, N., Derrible, S., Eason, T. & Cabezas, H. (2016). Using Fisher
+    information to track stability in multivariate systems. *Royal Society Open
+    Science*, 3:160582. DOI: 10.1098/rsos.160582.
+    """
+    if not isinstance(data, pd.DataFrame):
+        raise ValueError(f"data must be a pandas DataFrame; got {type(data).__name__}")
+    absent = [c for c in (time_col, variable_col, value_col) if c not in data.columns]
+    if absent:
+        raise ValueError(
+            f"data is missing long-format column(s) {absent}; "
+            f"present columns are {list(data.columns)}"
+        )
+    if data.shape[0] == 0:
+        raise ValueError("data must be non-empty")
+    if not pd.api.types.is_numeric_dtype(data[value_col]):
+        raise ValueError(
+            f"{value_col!r} must be numeric; got dtype {data[value_col].dtype}"
+        )
+    if not int(window_size) == window_size or window_size < 2:
+        raise ValueError(f"window_size must be an integer >= 2; got {window_size!r}")
+    if not int(window_increment) == window_increment or window_increment < 1:
+        raise ValueError(f"window_increment must be an integer >= 1; got {window_increment!r}")
+    if not int(n_levels) == n_levels or n_levels < 1:
+        raise ValueError(f"n_levels must be an integer >= 1; got {n_levels!r}")
+
+    # Reshape long -> wide (time x variable), preserving order of first
+    # appearance for both axes.  Absent (time, variable) pairs become NaN.
+    times = data[time_col].drop_duplicates().tolist()
+    variables = data[variable_col].drop_duplicates().tolist()
+    try:
+        wide = data.pivot(index=time_col, columns=variable_col, values=value_col)
+    except ValueError as exc:
+        raise ValueError(
+            f"data has duplicate ({time_col}, {variable_col}) pairs; expected one "
+            f"value per variable per time step ({exc})"
+        ) from exc
+    wide = wide.reindex(index=times, columns=variables)
+
+    values = wide.to_numpy(dtype=float)
+    n_rows, n_vars = values.shape
+    if window_size > n_rows:
+        raise ValueError(
+            f"window_size ({window_size}) exceeds the number of time steps ({n_rows})"
+        )
+
+    if size_of_states is None:
+        sost = _fi_size_of_states(values, sost_window or window_size, float(sost_k))
+    else:
+        sost = np.asarray(size_of_states, dtype=float)
+        if sost.shape != (n_vars,):
+            raise ValueError(
+                f"size_of_states must have one value per variable ({n_vars}); "
+                f"got shape {sost.shape}"
+            )
+        if not np.all(np.isfinite(sost)) or np.any(sost < 0):
+            raise ValueError("size_of_states values must be finite and non-negative")
+
+    # Each of the n_levels tightening levels tl maps to an integer match-count
+    # threshold ceil(n_vars * tl / n_levels) in [1, n_vars]; distinct thresholds
+    # are grouped once and shared across the levels that map to them.
+    tls = np.arange(1, n_levels + 1)
+    thr_per_level = np.clip(np.ceil(n_vars * tls / n_levels).astype(int), 1, n_vars)
+    unique_thresholds = np.unique(thr_per_level)
+
+    end_labels: list = []
+    fi_values: list[float] = []
+    for start in range(0, n_rows, window_increment):
+        win = values[start:start + window_size]
+        if win.shape[0] != window_size:
+            continue
+
+        # Pairwise count of variables in which two points share a state.
+        diff = np.abs(win[:, None, :] - win[None, :, :])   # (w, w, n_vars)
+        with np.errstate(invalid="ignore"):                # NaN comparisons -> False
+            within = diff <= sost
+        bin_mat = within.sum(axis=2).astype(float)
+        np.fill_diagonal(bin_mat, -1.0)                    # a point never bins with itself here
+
+        fi_by_thr = {
+            int(thr): _fi_from_state_sizes(_fi_state_sizes(bin_mat, int(thr)), window_size)
+            for thr in unique_thresholds
+        }
+        fi_levels = np.array([fi_by_thr[int(thr)] for thr in thr_per_level])
+
+        informative = ~np.isclose(fi_levels, _FI_SINGLE_STATE)
+        k_init = int(np.argmax(informative)) if informative.any() else 0
+        fi_values.append(float(fi_levels[k_init:].mean()))
+        end_labels.append(wide.index[start + window_size - 1])
+
+    index = pd.Index(end_labels, name=time_col)
+    return pd.DataFrame({"fisher_information": fi_values}, index=index)
