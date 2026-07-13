@@ -15,7 +15,7 @@ edge_list.tsv
 
 # Claude Code
 CLAUDE.md
-.claude/settings.local.json
+.claude
 
 # compsoc
 tutorials/
