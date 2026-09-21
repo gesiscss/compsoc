@@ -1116,3 +1116,186 @@ def fisher_information_multivariate(
 
     index = pd.Index(end_labels, name=time_col)
     return pd.DataFrame({"fisher_information": fi_values}, index=index)
+
+
+def avalanches(
+    data: pd.DataFrame,
+    time_col: str = "time",
+    variable_col: str = "variable",
+    weight_col: str | None = None,
+    gap: int = 1,
+    drop_censored_left: bool = False,
+    drop_censored_right: bool = False,
+) -> pd.DataFrame:
+    """Extract avalanches from a long-format record of observations.
+
+    An *avalanche* is an uninterrupted sequence of observations of one variable:
+    it starts when the variable is observed after having been absent, continues
+    for as long as no more than *gap* time steps pass between consecutive
+    observations, and ends with the last observation before the next
+    interruption.  One row of *data* is one observation.  Each avalanche has a
+    *size* (total weight of its observations) and a *duration* (number of time
+    steps it spans), whose joint distribution characterises how the process
+    releases activity in bursts.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Observations in **long (tidy) format**: one row per observation, with a
+        time column and a variable column (see *time_col*, *variable_col*) and
+        optionally a weight column (see *weight_col*).  Not modified; the
+        function works on a sorted copy of the columns it needs.
+    time_col : str, optional
+        Column holding the time step of each observation.  Must be of integer
+        dtype and encode *contiguous* units of one resolution (day, month,
+        year, ...), because avalanches are cut on the difference between
+        successive values.
+        Calendar strings or timestamps must be discretised by the caller first,
+        e.g. with ``pandas.factorize`` or ``.astype('category').cat.codes``.
+        Default ``'time'``.
+    variable_col : str, optional
+        Column holding the variable whose sequence of observations is traced.
+        Any hashable dtype; categorical dtype is preserved in the output.
+        Default ``'variable'``.
+    weight_col : str or None, optional
+        Numeric column holding the weight of each observation.  ``None``
+        (default) weights every observation as 1, so ``size`` counts
+        observations.
+    gap : int, optional
+        Largest difference between the time steps of two successive
+        observations of a variable that still continues the same avalanche
+        (``>= 1``).  With the default ``1``, avalanches break at the first time
+        step in which the variable is not observed.  Larger values tolerate
+        longer interruptions; note that what counts as an interruption depends
+        on the resolution of *time_col*, so a value chosen for daily data does
+        not carry over to yearly data.
+    drop_censored_left : bool, optional
+        Drop avalanches that were already running when observation began (see
+        *Returns*).  Default ``False``.
+    drop_censored_right : bool, optional
+        Drop avalanches that were still running when observation ended.  Default
+        ``False``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per avalanche, ordered by variable and then by start time, with
+        a fresh ``RangeIndex`` and the columns:
+
+        ``{variable_col}`` - the variable, in the dtype it has in *data*.
+
+        ``time_from``, ``time_to`` - time step of the first and of the last
+        observation in the avalanche.
+
+        ``size`` - total weight of the observations of the avalanche; a count
+        when *weight_col* is ``None``.
+
+        ``duration`` - ``time_to - time_from + 1``, so a variable observed
+        within a single time step has duration 1.
+
+        ``censored_left``, ``censored_right`` - ``True`` when the avalanche
+        touches the first (respectively last) time step observed anywhere in
+        *data*, and its true extent therefore reaches beyond the observation
+        window.  The reported size and duration of such an avalanche are lower
+        bounds.  Empty (with these columns and dtypes) if every avalanche is
+        dropped.
+
+    Raises
+    ------
+    ValueError
+        If *data* is not a non-empty DataFrame, if *time_col*, *variable_col* or
+        *weight_col* is missing from it, if any of those columns holds missing
+        values, if *time_col* is not of integer dtype, if *weight_col* is
+        non-numeric, or if *gap* is not an integer ``>= 1``.
+
+    Notes
+    -----
+    Censoring is the reason the two ``censored_*`` columns exist: an avalanche
+    that overlaps an edge of the observation window is truncated there, so its
+    size and duration are underestimates.  Because large avalanches are the more
+    likely to be cut, keeping them biases the tail of the size distribution
+    downwards - which is exactly the tail a power-law fit (see
+    :func:`scale_free`) is driven by.  Dropping them is not free either: it
+    removes the largest events preferentially, and at coarse resolutions (few
+    time steps) it can remove a sizeable share of all avalanches.  The columns
+    are returned unconditionally so that the choice can be made, and reported,
+    per analysis.
+
+    Simultaneous observations are merged rather than separated: two
+    observations of the same variable in the same time step contribute their
+    weights to one avalanche of duration 1, whatever their order within the
+    step.  The result therefore does not depend on how ties in *time_col* are
+    ordered in *data*.
+
+    Cost is dominated by the sort, ``O(n log n)`` in the number of
+    observations; the avalanche boundaries themselves are found in one
+    vectorised pass.
+    """
+    if not isinstance(data, pd.DataFrame):
+        raise ValueError(f"data must be a pandas DataFrame; got {type(data).__name__}")
+    columns = [time_col, variable_col] + ([weight_col] if weight_col is not None else [])
+    absent = [c for c in columns if c not in data.columns]
+    if absent:
+        raise ValueError(
+            f"data is missing long-format column(s) {absent}; "
+            f"present columns are {list(data.columns)}"
+        )
+    if data.shape[0] == 0:
+        raise ValueError("data must be non-empty")
+    incomplete = [c for c in columns if data[c].isna().any()]
+    if incomplete:
+        raise ValueError(f"column(s) {incomplete} hold missing values")
+    if not pd.api.types.is_integer_dtype(data[time_col]):
+        raise ValueError(
+            f"{time_col!r} must be of integer dtype, encoding contiguous time "
+            f"units; got dtype {data[time_col].dtype}"
+        )
+    if weight_col is not None and not pd.api.types.is_numeric_dtype(data[weight_col]):
+        raise ValueError(
+            f"{weight_col!r} must be numeric; got dtype {data[weight_col].dtype}"
+        )
+    if not int(gap) == gap or gap < 1:
+        raise ValueError(f"gap must be an integer >= 1; got {gap!r}")
+
+    # Sorting by (variable, time) puts the observations of every variable into
+    # one contiguous, chronologically ordered block, so avalanche boundaries
+    # become a single comparison between neighbouring rows.
+    ordered = data[columns].sort_values([variable_col, time_col], kind="stable")
+    variables = ordered[variable_col]
+    times = ordered[time_col].to_numpy(dtype=np.int64)
+    if weight_col is None:
+        weights = np.ones(times.size, dtype=np.int64)
+    else:
+        weights = ordered[weight_col].to_numpy()
+
+    # A row opens a new avalanche when it is the first row, when the variable
+    # changes, or when the time since the previous observation exceeds *gap*.
+    # Comparing factorised codes keeps this test dtype-agnostic.
+    codes = pd.factorize(variables, sort=False)[0]
+    opens = np.empty(times.size, dtype=bool)
+    opens[0] = True
+    opens[1:] = (codes[1:] != codes[:-1]) | (np.diff(times) > int(gap))
+
+    starts = np.flatnonzero(opens)
+    ends = np.append(starts[1:], times.size) - 1
+
+    time_from = times[starts]
+    time_to = times[ends]  # times ascend within a block, so the last row is the maximum
+    result = pd.DataFrame({
+        variable_col: variables.to_numpy()[starts],
+        "time_from": time_from,
+        "time_to": time_to,
+        "size": np.add.reduceat(weights, starts),
+        "duration": time_to - time_from + 1,
+        "censored_left": time_from == times.min(),
+        "censored_right": time_to == times.max(),
+    })
+    if result[variable_col].dtype != variables.dtype:  # restore categorical etc.
+        result[variable_col] = result[variable_col].astype(variables.dtype)
+
+    keep = np.ones(result.shape[0], dtype=bool)
+    if drop_censored_left:
+        keep &= ~result["censored_left"].to_numpy()
+    if drop_censored_right:
+        keep &= ~result["censored_right"].to_numpy()
+    return result[keep].reset_index(drop=True)
