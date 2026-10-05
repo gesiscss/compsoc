@@ -17,7 +17,8 @@ from collections.abc import Sequence
 from numpy.lib.stride_tricks import sliding_window_view
 from pathlib import Path
 from scipy.optimize import curve_fit
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse.csgraph import shortest_path
 from sklearn.preprocessing import normalize
 from typing import Literal, NamedTuple
 
@@ -424,7 +425,7 @@ def construct_graph(
 class PercolationResult(NamedTuple):
     """Return value of :func:`percolation`."""
 
-    S_1: int    # size of largest component (0 when only one component)
+    S_1: int    # size of largest component (N when only one component)
     S_2: int    # size of second-largest component (0 when only one component)
     P: float    # percolation probability = S_1 / N
     chi: float  # susceptibility (nan when graph has a single component)
@@ -441,10 +442,10 @@ def percolation(g: gt.Graph) -> PercolationResult:
     Returns
     -------
     PercolationResult
-        Named tuple with three fields:
+        Named tuple with four fields:
 
-        ``S_1`` — size of the largest component.  Returns ``0`` when
-        the graph consists of exactly one component.
+        ``S_1`` — size of the largest component.  Equals N when the graph
+        consists of exactly one component.
 
         ``S_2`` — size of the second-largest component.  Returns ``0`` when
         the graph consists of exactly one component.
@@ -458,6 +459,11 @@ def percolation(g: gt.Graph) -> PercolationResult:
         largest component excluded.  Returns ``nan`` when the graph consists
         of exactly one component (susceptibility is undefined).
 
+    Raises
+    ------
+    ValueError
+        If *g* is directed.
+
     Notes
     -----
     The susceptibility formula subtracts S_1² from the full weighted sum
@@ -465,6 +471,12 @@ def percolation(g: gt.Graph) -> PercolationResult:
     the rare case where two components share the maximum size: exactly one
     giant is excluded from χ while P still reflects only the single largest.
     """
+    if g.is_directed():
+        raise ValueError(
+            "g must be undirected; pass gt.GraphView(g, directed=False) "
+            "to analyse a directed graph as undirected."
+        )
+
     n_nodes = g.num_vertices()
     _, hist = gt.label_components(g)
     comp_sizes = sorted(hist.tolist(), reverse=True)
@@ -483,6 +495,178 @@ def percolation(g: gt.Graph) -> PercolationResult:
     chi = chi_num / n_nodes if chi_num > 0 else np.nan
 
     return PercolationResult(S_1=S_1, S_2=S_2, P=P, chi=chi)
+
+
+# Upper bound on the entries of one dense block of shortest-path distances
+# (8 bytes each); caps the memory correlation_length needs per BFS call.
+_CL_MAX_BLOCK_ENTRIES: int = 1 << 22
+# Small components are packed into blocks of up to this many vertices so they
+# share one shortest-path call (fastest on 10^6-vertex Erdős–Rényi tests).
+_CL_BATCH_VERTICES: int = 256
+
+
+def _cl_squared_distance_sums(
+    g: gt.Graph,
+    labels: np.ndarray,
+    sizes: np.ndarray,
+    comps: np.ndarray,
+) -> np.ndarray:
+    """Sum squared shortest-path distances over ordered vertex pairs per component.
+
+    Returns ``Σ_{i,j∈C} d_ij²`` for each component label C in *comps*, in the
+    same order.  *labels* holds the component label of every vertex, indexed
+    by vertex index; *sizes* holds the component sizes, indexed by label.
+    Each component gets a contiguous block of a sparse adjacency matrix, and
+    whole components are packed into blocks of up to ``_CL_BATCH_VERTICES``
+    vertices that share one breadth-first shortest-path call.  Distances
+    between different components of a block are infinite and ignored.
+
+    ``gt.distance_histogram`` is deliberately avoided: on filtered graph views
+    its parallel implementation returns wrong, run-dependent counts
+    (graph-tool 2.98).
+    """
+    out = np.zeros(len(comps))
+    multi = sizes[comps] > 1                    # singletons contribute nothing
+    if not multi.any():
+        return out
+    comps = comps[multi]
+
+    # Order the vertices of the requested components by component
+    rank = np.full(len(sizes), -1, dtype=np.int64)
+    rank[comps] = np.arange(len(comps))
+    vertices = g.get_vertices()
+    vertex_rank = rank[labels[vertices]]
+    keep = vertex_rank >= 0
+    by_comp = np.argsort(vertex_rank[keep], kind="stable")
+    members = vertices[keep][by_comp]
+    comp_of_row = vertex_rank[keep][by_comp]
+
+    # Sparse adjacency in that order; edges of other components are dropped
+    n = len(members)
+    pos = np.full(g.num_vertices(ignore_filter=True), -1, dtype=np.int64)
+    pos[members] = np.arange(n)
+    edges = pos[g.get_edges()]
+    edges = edges[edges[:, 0] >= 0]
+    adj = csr_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(n, n))
+
+    bounds = np.zeros(len(comps) + 1, dtype=np.int64)
+    bounds[1:] = np.cumsum(sizes[comps])
+    row_sums = np.zeros(n)
+    start = 0
+    while start < n:
+        # Extend the block by whole components; a large one forms its own block
+        last = np.searchsorted(bounds, start + _CL_BATCH_VERTICES, side="right") - 1
+        end = bounds[last] if bounds[last] > start else bounds[last + 1]
+        block = adj[start:end, start:end]
+        # Process the sources in chunks to bound the dense distance block
+        step = max(1, _CL_MAX_BLOCK_ENTRIES // (end - start))
+        for i in range(start, end, step):
+            stop = min(i + step, end)
+            dist = shortest_path(
+                block,
+                method="D",
+                unweighted=True,
+                directed=False,
+                indices=np.arange(i - start, stop - start),
+            )
+            dist[np.isinf(dist)] = 0.0          # pairs in different components
+            row_sums[i:stop] = np.square(dist).sum(axis=1)
+        start = end
+
+    out[multi] = np.bincount(comp_of_row, weights=row_sums, minlength=len(comps))
+    return out
+
+
+class CorrelationLengthResult(NamedTuple):
+    """Return value of :func:`correlation_length`."""
+
+    xi: float        # correlation length of the finite components
+    xi_no_S2: float  # correlation length without the second-largest component
+    R_S2: float      # radius of gyration of the second-largest component
+
+
+def correlation_length(g: gt.Graph) -> CorrelationLengthResult:
+    """Compute the correlation length of the finite components of a graph.
+
+    Parameters
+    ----------
+    g : gt.Graph
+        An undirected graph-tool graph.  Filtered graph views are supported.
+
+    Returns
+    -------
+    CorrelationLengthResult
+        Named tuple with three fields:
+
+        ``xi`` — correlation length ξ of the finite components, i.e. all
+        components except the largest:
+        ξ² = Σ_C Σ_{i,j∈C} d_ij² / Σ_C s_C² = Σ_C 2R_C² · s_C² / Σ_C s_C²,
+        where d_ij is the shortest-path distance between vertices i and j,
+        and s_C and R_C are the size and radius of gyration of component C.
+        ξ is the root-mean-square distance between two vertices drawn from
+        the same finite component (ordered pairs, i = j included).  Returns
+        ``nan`` when the graph has fewer than two components.
+
+        ``xi_no_S2`` — the same correlation length with the second-largest
+        component excluded as well.  Returns ``nan`` when the graph has
+        fewer than three components.
+
+        ``R_S2`` — radius of gyration of the second-largest component,
+        R_S2² = Σ_{i,j∈S_2} d_ij² / (2 S_2²), i.e. half the mean squared
+        distance between two of its vertices (pairs counted as for ``xi``).
+        Returns ``nan`` when the graph has fewer than two components.
+
+    Raises
+    ------
+    ValueError
+        If *g* is directed.
+
+    Notes
+    -----
+    ξ follows Stauffer & Aharony (1994), with distances measured in hops and
+    the largest component standing in for the infinite cluster, as for the
+    susceptibility in :func:`percolation`.  The pair form of the radius of
+    gyration equals the root-mean-square distance from the centre of mass in
+    Euclidean space; networks have no centre of mass, so the pair form serves
+    as the definition.
+
+    Because ξ² weights each component by s_C², the largest finite component
+    can dominate it near the percolation threshold.  The three outputs are
+    tied by the exact identity
+
+        ξ² = w · 2R_S2² + (1 − w) · ξ_no_S2²,   w = S_2² / (χ N),
+
+    where S_2 and χ are as returned by :func:`percolation` and N is the number
+    of vertices.  Comparing ``xi`` with ``xi_no_S2`` thus shows how much of ξ
+    is due to S_2 alone.
+
+    Ties in component size are broken deterministically.  Shortest paths are
+    computed within each finite component only, so the run time grows with
+    Σ_C s_C² rather than with N².
+    """
+    if g.is_directed():
+        raise ValueError(
+            "g must be undirected; pass gt.GraphView(g, directed=False) "
+            "to analyse a directed graph as undirected."
+        )
+
+    labels, hist = gt.label_components(g)
+    sizes = hist.astype(np.int64)
+    if len(sizes) < 2:
+        return CorrelationLengthResult(xi=np.nan, xi_no_S2=np.nan, R_S2=np.nan)
+
+    # Finite components, largest first; the stable sort breaks ties by label
+    finite = np.argsort(-sizes, kind="stable")[1:]
+    d2 = _cl_squared_distance_sums(g, labels.a, sizes, finite)
+    s2 = sizes[finite].astype(float) ** 2
+
+    xi = np.sqrt(d2.sum() / s2.sum())
+    xi_no_S2 = np.sqrt(d2[1:].sum() / s2[1:].sum()) if len(finite) > 1 else np.nan
+    R_S2 = np.sqrt(d2[0] / (2.0 * s2[0]))
+
+    return CorrelationLengthResult(
+        xi=float(xi), xi_no_S2=float(xi_no_S2), R_S2=float(R_S2)
+    )
 
 
 # Graphs larger than this use sampled ASPL estimation instead of all-pairs BFS.
