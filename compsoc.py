@@ -14,6 +14,7 @@ import warnings
 
 from collections import Counter
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from numpy.lib.stride_tricks import sliding_window_view
 from pathlib import Path
 from scipy.optimize import curve_fit
@@ -687,7 +688,7 @@ class SmallWorldResult(NamedTuple):
 def small_world(
     g: gt.Graph,
     sample_size: int = _ASPL_SAMPLE_SIZE,
-    seed: int | None = None,
+    seed: int | None = 42,
 ) -> SmallWorldResult:
     """Compute small-world properties of the largest connected component.
 
@@ -702,11 +703,10 @@ def small_world(
         ``σ / √sample_size``, where σ is the standard deviation of
         per-vertex mean distances.  Must be an integer >= 1.  Default ``500``.
     seed : int or None, optional
-        Seed for graph-tool's random-number generator (``gt.seed_rng``), which
-        picks the sources for the sampled estimate.  Note that this reseeds
-        graph-tool's global generator.  ``None`` leaves the generator as it
-        is, which gives a non-deterministic result unless it was seeded
-        before.  Default ``None``.
+        Seed for the random-number generator that picks the sources of the
+        sampled estimate.  The generator is local (``np.random.default_rng``),
+        so the global generators of NumPy and graph-tool are left untouched.
+        ``None`` gives a non-deterministic result.  Default ``42``.
 
     Returns
     -------
@@ -777,15 +777,20 @@ def small_world(
     # Average shortest path length
     # ------------------------------------------------------------------ #
     if n > _ASPL_SAMPLE_THRESHOLD:
-        # Estimate L from the distances of a random sample of source vertices,
-        # drawn without replacement; distance_histogram runs their BFS in
-        # parallel.  Full all-pairs BFS is O(N(N+M)) and infeasible at this
-        # scale.  The LCC is a pruned copy: on filtered graph views,
-        # distance_histogram returns wrong counts when run in parallel.
-        if seed is not None:
-            gt.seed_rng(seed)
-        counts, bins = gt.distance_histogram(lcc, samples=min(int(sample_size), n))
-        L = float(np.sum(counts * bins[:-1]) / np.sum(counts))
+        # Estimate L by averaging single-source mean distances over a random
+        # sample of source vertices, drawn without replacement.  graph-tool
+        # releases the GIL during each BFS, so they run concurrently in
+        # threads.  Full all-pairs BFS is O(N(N+M)) and infeasible at this
+        # scale; each single-source BFS is O(N+M).
+        rng = np.random.default_rng(seed)
+        sources = rng.choice(n, size=min(int(sample_size), n), replace=False)
+
+        def mean_distance(v: int) -> float:
+            dist = gt.shortest_distance(lcc, source=lcc.vertex(int(v)))
+            return dist.a.sum() / (n - 1)
+
+        with ThreadPoolExecutor(gt.openmp_get_num_threads()) as pool:
+            L = float(np.mean(list(pool.map(mean_distance, sources))))
     else:
         # Exact: all-pairs BFS into an N x N distance matrix, the fastest route
         dist = gt.shortest_distance(lcc)
