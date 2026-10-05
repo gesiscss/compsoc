@@ -679,9 +679,9 @@ class SmallWorldResult(NamedTuple):
     """Return value of :func:`small_world`."""
 
     L: float       # average shortest path length of the LCC
-    L_norm: float  # l / l_random  (Erdős–Rényi baseline)
-    C: float       # average clustering coefficient of the LCC
-    C_norm: float  # c / c_random  (Erdős–Rényi baseline)
+    L_norm: float  # L / L_random  (Erdős–Rényi baseline)
+    C: float       # average local clustering coefficient of the LCC
+    C_norm: float  # C / C_random  (Erdős–Rényi baseline)
 
 
 def small_world(
@@ -700,41 +700,70 @@ def small_world(
         path length when the LCC exceeds ``40 000`` nodes.  By the central
         limit theorem the estimation error is proportional to
         ``σ / √sample_size``, where σ is the standard deviation of
-        per-vertex mean distances.  Default ``500``.
+        per-vertex mean distances.  Must be an integer >= 1.  Default ``500``.
     seed : int or None, optional
-        Seed for the random-number generator used in source sampling.
-        ``None`` gives a non-deterministic result.  Default ``None``.
+        Seed for graph-tool's random-number generator (``gt.seed_rng``), which
+        picks the sources for the sampled estimate.  Note that this reseeds
+        graph-tool's global generator.  ``None`` leaves the generator as it
+        is, which gives a non-deterministic result unless it was seeded
+        before.  Default ``None``.
 
     Returns
     -------
     SmallWorldResult
         Named tuple with four fields:
 
-        ``l`` — average shortest path length of the LCC.  Exact for graphs
-        with N ≤ 40 000 nodes; estimated by averaging single-source mean
-        distances over ``sample_size`` randomly chosen sources otherwise.
+        ``L`` — average shortest path length of the LCC.  Exact for graphs
+        with N ≤ 40 000 nodes; estimated from the distances of
+        ``sample_size`` randomly chosen sources (drawn without replacement)
+        otherwise.
 
-        ``l_ratio`` — l / l_random, where l_random is the Fronczak et al.
+        ``L_norm`` — L / L_random, where L_random is the Fronczak et al.
         (2004) Erdős–Rényi baseline:
         (ln N − γ) / ln ⟨k⟩ + 0.5  (γ = Euler–Mascheroni constant).
 
-        ``c`` — average clustering coefficient of the LCC computed by
-        ``graph_tool.global_clustering``.
+        ``C`` — average local clustering coefficient of the LCC (Watts &
+        Strogatz 1998): the mean over all vertices of c_i, the fraction of
+        pairs of neighbours of vertex i that are themselves connected, with
+        c_i = 0 for vertices of degree < 2.
 
-        ``c_ratio`` — c / c_random, where c_random = 2m / (N(N−1)) is the
-        edge density, equal to the expected clustering of an Erdős–Rényi
-        graph with the same N and m.
+        ``C_norm`` — C / C_random, where C_random is the expected C of an
+        Erdős–Rényi graph with the same N and m.  There, a vertex of degree
+        ≥ 2 has an expected c_i equal to the edge density p = 2m / (N(N−1)),
+        and the other vertices count as zero, so C_random = p · P(k ≥ 2),
+        with the binomial share of vertices of degree ≥ 2,
+        P(k ≥ 2) = 1 − (1 − p)^(N−1) − (N − 1) p (1 − p)^(N−2).  Returns
+        ``nan`` when the LCC is a single edge, where C_random = 0.
 
     Raises
     ------
     ValueError
-        If the LCC has fewer than 2 vertices.
+        If *g* is directed, *sample_size* is not an integer >= 1, or the
+        LCC has fewer than 2 vertices.
 
     Notes
     -----
-    Small-world character is indicated by ``l_ratio ≈ 1`` (path lengths
-    comparable to a random graph) and ``c_ratio >> 1`` (far more clustered).
+    Small-world character is indicated by ``L_norm ≈ 1`` (path lengths
+    comparable to a random graph) and ``C_norm >> 1`` (far more clustered).
+
+    C_random is exact for an Erdős–Rényi graph with the LCC's N and m.  The
+    LCC of a sparse random graph, however, is denser than the graph in which
+    its triangles formed, so its C_norm stays below 1 when ⟨k⟩ is small
+    (about 0.87 at ⟨k⟩ = 3 and 0.66 at ⟨k⟩ = 2 in simulations; close to 1
+    from ⟨k⟩ ≈ 6 on).
+
+    The exact path length favours speed over memory: it keeps all N²
+    pairwise distances, about 6 GB at N = 40 000.  The sampled estimate
+    needs memory proportional to N.
     """
+    if g.is_directed():
+        raise ValueError(
+            "g must be undirected; pass gt.GraphView(g, directed=False) "
+            "to analyse a directed graph as undirected."
+        )
+    if not int(sample_size) == sample_size or sample_size < 1:
+        raise ValueError(f"sample_size must be an integer >= 1; got {sample_size!r}")
+
     lcc = gt.extract_largest_component(g, prune=True)
     n = lcc.num_vertices()
     m = lcc.num_edges()
@@ -748,36 +777,42 @@ def small_world(
     # Average shortest path length
     # ------------------------------------------------------------------ #
     if n > _ASPL_SAMPLE_THRESHOLD:
-        # Estimate l by averaging single-source mean distances over a random
-        # sample of source vertices.  Full all-pairs BFS is O(N(N+M)) and
-        # infeasible at this scale; each single-source BFS is O(N+M).
-        rng = np.random.default_rng(seed)
-        source_indices = rng.choice(n, size=min(sample_size, n), replace=False)
-        l = float(np.mean([
-            gt.shortest_distance(lcc, source=lcc.vertex(int(i))).a.sum() / (n - 1)
-            for i in source_indices
-        ]))
+        # Estimate L from the distances of a random sample of source vertices,
+        # drawn without replacement; distance_histogram runs their BFS in
+        # parallel.  Full all-pairs BFS is O(N(N+M)) and infeasible at this
+        # scale.  The LCC is a pruned copy: on filtered graph views,
+        # distance_histogram returns wrong counts when run in parallel.
+        if seed is not None:
+            gt.seed_rng(seed)
+        counts, bins = gt.distance_histogram(lcc, samples=min(int(sample_size), n))
+        L = float(np.sum(counts * bins[:-1]) / np.sum(counts))
     else:
+        # Exact: all-pairs BFS into an N x N distance matrix, the fastest route
         dist = gt.shortest_distance(lcc)
-        l = float(np.mean([dist[v].a.sum() / (n - 1) for v in lcc.vertices()]))
+        L = float(np.mean([dist[v].a.sum() / (n - 1) for v in lcc.vertices()]))
 
     # ------------------------------------------------------------------ #
     # Erdős–Rényi baselines
     # ------------------------------------------------------------------ #
     k = 2 * m / n                                    # mean degree
-    l_random = (np.log(n) - np.euler_gamma) / np.log(k) + 0.5
-    c_random = m / (n * (n - 1) / 2)                # edge density
+    L_random = float((np.log(n) - np.euler_gamma) / np.log(k) + 0.5)
+    p = m / (n * (n - 1) / 2)                        # edge density
+    # Expected C: vertices of degree >= 2 have E[c_i] = p, the others count as 0
+    share = 1 - (1 - p) ** (n - 1) - (n - 1) * p * (1 - p) ** (n - 2)
+    C_random = p * share
 
     # ------------------------------------------------------------------ #
-    # Average clustering coefficient
+    # Average local clustering coefficient, with c_i = 0 for degree < 2
     # ------------------------------------------------------------------ #
-    c = gt.global_clustering(lcc)[0]
+    local = gt.local_clustering(lcc).a
+    degree = lcc.get_out_degrees(lcc.get_vertices())
+    C = float(np.mean(np.where(degree >= 2, local, 0.0)))
 
     return SmallWorldResult(
-        L=l,
-        L_norm=l / l_random,
-        C=c,
-        C_norm=c / c_random,
+        L=L,
+        L_norm=L / L_random,
+        C=C,
+        C_norm=C / C_random if C_random > 0 else np.nan,
     )
 
 
@@ -912,7 +947,7 @@ def fractality(
     Returns
     -------
     FractalityResult
-        Named tuple with four fields:
+        Named tuple with five fields:
 
         ``a`` — power-law prefactor.
 
@@ -936,16 +971,23 @@ def fractality(
     subprocess.CalledProcessError
         If the box-covering binary exits with a non-zero status.
     ValueError
-        If *d_B* is not a positive number.
+        If *g* is directed or *d_B* is not a positive number.
 
     Notes
     -----
-    Returns ``FractalityResult(nan, nan, nan, [])`` when the LCC diameter
-    is less than 5, as too few radius steps exist for reliable curve fitting.
+    When the LCC diameter is less than 5, too few radius steps exist for
+    reliable curve fitting; the result then has ``a`` and ``d_B`` set to
+    ``nan``, ``l`` set to ``nan`` (``None`` when *truncated* is ``False``)
+    and empty ``boxes`` and ``centers``.
 
     Requires the sketch-based box-covering binary from
     https://github.com/kenkoooo/graph-sketch-fractality (Akiba et al. 2015).
     """
+    if g.is_directed():
+        raise ValueError(
+            "g must be undirected; pass gt.GraphView(g, directed=False) "
+            "to analyse a directed graph as undirected."
+        )
     if d_B is not None and d_B <= 0:
         raise ValueError(f"d_B must be a positive number; got {d_B!r}")
 
@@ -957,7 +999,13 @@ def fractality(
     diameter = int(gt.pseudo_diameter(lcc)[0])
 
     if diameter < 5:
-        return FractalityResult(a=np.nan, d_B=np.nan, l=np.nan, boxes={}, centers={})
+        return FractalityResult(
+            a=np.nan,
+            d_B=np.nan,
+            l=np.nan if truncated else None,
+            boxes={},
+            centers={},
+        )
 
     if rad_max is None:
         rad_max = diameter
